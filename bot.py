@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-BOT_TOKEN = "12345678:ABCDEfgHIDUROVjkLmNOPQRSTUvw-cdEfgHI"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 LEAD_IDS = [int(x) for x in os.getenv("LEAD_IDS", "").split(",") if x]
 DB_FILE = "bot.db"
