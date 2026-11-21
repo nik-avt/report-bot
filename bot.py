@@ -142,13 +142,13 @@ async def get_value(message: Message, state: FSMContext):
     metric_label, metric_key = METRICS_ORDER[metric_index]
     values = data.get("values", {})
     
-    if metric_key == "dk_vydacha" and value < values.get("dk_zayavki", 0):
-        await message.answer(f"⚠️ ДК выдача ({int(value)}) < ДК заявок ({int(values.get('dk_zayavki',0))}). Введи ≥ {int(values.get('dk_zayavki',0))}:"); return
-    if metric_key == "idk_vydacha" and value < values.get("idk_zayavki", 0):
-        await message.answer(f"⚠️ ИДК выдача ({int(value)}) < ИДК заявок ({int(values.get('idk_zayavki',0))}). Введи ≥ {int(values.get('idk_zayavki',0))}:"); return
-    
+    if metric_key == "dk_vydacha" and value > values.get("dk_zayavki", 0):
+        await message.answer(f"⚠️ ДК выдача ({int(value)}) > ДК заявок ({int(values.get('dk_zayavki',0))}). Выдача не может быть больше заявок. Введи ≤ {int(values.get('dk_zayavki',0))}:"); return
+    if metric_key == "idk_vydacha" and value > values.get("idk_zayavki", 0):
+        await message.answer(f"⚠️ ИДК выдача ({int(value)}) > ИДК заявок ({int(values.get('idk_zayavki',0))}). Выдача не может быть больше заявок. Введи ≤ {int(values.get('idk_zayavki',0))}:"); return
     values[metric_key] = value; await state.update_data(values=values)
     metric_index += 1
+
     if metric_index < len(METRICS_ORDER):
         await state.update_data(metric_index=metric_index)
         metric_label, _ = METRICS_ORDER[metric_index]
