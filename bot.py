@@ -87,6 +87,8 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.message(InputState.waiting_name)
 async def save_name(message: Message, state: FSMContext):
+    if message.text.strip().startswith("/"):
+        await message.answer("❗ Это команда, а не имя. Введи ФИО обычным текстом:"); return
     conn = sqlite3.connect(DB_FILE)
     conn.execute("INSERT INTO users (tg_id, full_name) VALUES (?, ?)", (message.from_user.id, message.text.strip()))
     conn.commit(); conn.close()
