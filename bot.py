@@ -507,7 +507,10 @@ async def list_users(message: Message):
     for tg_id, full_name in users:
         role_icon = "👨‍💻" if tg_id in ADMIN_IDS else ("👔" if tg_id in LEAD_IDS else "👤")
         text += f"{role_icon} {full_name} (ID: {tg_id})\n"
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"📊 Динамика", callback_data=f"user_summary_{tg_id}"), InlineKeyboardButton(text=f"📎 Excel", callback_data=f"user_export_{tg_id}")])
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"📊 Динамика: {full_name}", callback_data=f"user_summary_{tg_id}"),
+            InlineKeyboardButton(text=f"📎 Excel: {full_name}", callback_data=f"user_export_{tg_id}")
+        ])
     await message.answer(text, reply_markup=keyboard)
 
 @router.callback_query(F.data.startswith("user_summary_"))
