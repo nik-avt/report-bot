@@ -258,6 +258,19 @@ async def admin_records(message: Message):
         v = int(value) if value == int(value) else value; text += f"• {date} | {metric_name}: {v}\n"
         keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"✏️ {date} {metric_name}", callback_data=f"admin_edit_{rec_id}"), InlineKeyboardButton(text="🗑️", callback_data=f"admin_delete_{rec_id}")])
     await message.answer(text, reply_markup=keyboard)
+@router.message(Command("del_user"))
+async def del_user(message: Message):
+    if get_role(message.from_user.id) != "admin":
+        await message.answer("⛔ Только админ."); return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Используй: /del_user [ID]"); return
+    tid = int(args[1])
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute("DELETE FROM data WHERE tg_id = ?", (tid,))
+    conn.execute("DELETE FROM users WHERE tg_id = ?", (tid,))
+    conn.commit(); conn.close()
+    await message.answer(f"🗑 Пользователь {tid} и все его записи удалены.")
 
 @router.callback_query(F.data.startswith("admin_edit_"))
 async def admin_start_edit(callback: CallbackQuery, state: FSMContext):
