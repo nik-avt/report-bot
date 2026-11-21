@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton,
+    Message, ReplyKeyboardMarkup, KeyboardButton,ReplyKeyboardRemove
     InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
 )
 from openpyxl import Workbook
@@ -126,7 +126,7 @@ async def get_date(message: Message, state: FSMContext):
     await state.update_data(date=date_str, values={}, metric_index=0, is_replace=is_replace)
     await state.set_state(InputState.waiting_value)
     metric_label, _ = METRICS_ORDER[0]
-    await message.answer(f"📊 Дата: {date_str}\n\n1️⃣ Введи: {metric_label}", reply_markup=ReplyKeyboardMarkup(remove_keyboard=True))
+    await message.answer(f"📊 Дата: {date_str}\n\n1️⃣ Введи: {metric_label}", reply_markup=ReplyKeyboardRemove())
 
 @router.message(InputState.waiting_value)
 async def get_value(message: Message, state: FSMContext):
