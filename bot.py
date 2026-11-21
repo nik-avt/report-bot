@@ -440,30 +440,103 @@ def generate_excel_for_user(tg_id, start_date=None, end_date=None):
 @router.message(Command("export"))
 async def export_excel(message: Message):
     role = get_role(message.from_user.id)
-    if role not in ("admin", "lead"): await message.answer("⛔ Только руководитель или админ."); return
-    args = message.text.split()
-    if len(args) >= 3 and args[1].lower() == 'user':
-        try: target_id = int(args[2])
-        except ValueError: await message.answer("❌ Неверный ID. Пример: /export user 123456789 week"); return
-        period_args = ' '.join(args[3:]) if len(args) > 3 else ''
-        start_date, end_date = parse_date_range(period_args)
-        try:
-            file_path, name = generate_excel_for_user(target_id, start_date, end_date)
-            if not file_path: await message.answer("📭 Нет данных."); return
-            caption = f"📎 Отчёт по {name}"
-            if start_date: caption += f": {start_date}{' – ' + end_date if start_date != end_date else ''}"
-            await message.answer_document(FSInputFile(file_path), caption=caption); os.remove(file_path)
-        except Exception as e: await message.answer(f"❌ Ошибка: {e}")
-        return
-    
-    args_str = ' '.join(args[1:]) if len(args) > 1 else ''
-    start_date, end_date = parse_date_range(args_str)
-    caption = "📎 Отчёт: все данные" if not start_date else (f"📎 Отчёт за {start_date}" if start_date == end_date else f"📎 Отчёт с {start_date} по {end_date}")
-    try:
-        file_path = generate_excel(start_date, end_date)
-        if not file_path: await message.answer("📭 Нет данных за выбранный период."); return
-        await message.answer_document(FSInputFile(file_path), caption=caption)
-    except Exception as e: await message.answer(f"❌ Ошибка: {e}")
+    if role not in ("admin", "lead"):
+        await message.answer("⛔ Только руководитель или админ."); return
+
+    args = message.text.split()[1:]
+    target = None
+    if args and args[0].lower() == "user":
+        if len(args) < 2:
+            await message.answer("❓ Укажи ID: /export user 123456789 [week|month]"); return
+        target = int(args[1]); args = args[2:]
+
+    now = datetime.now(MSK)
+    sd = ed = None
+    if not args:
+        pass
+    elif args[0].lower() == "week":
+        sd = now - timedelta(days=7); ed = now
+    elif args[0].lower() == "month":
+        sd = now.replace(day=1); ed = now
+    elif len(args) == 2:
+        sd = datetime.strptime(args[0], "%d.%m.%Y"); ed = datetime.strptime(args[1], "%d.%m.%Y")
+    else:
+        months = {"январь":1,"февраль":2,"март":3,"апрель":4,"май":5,"июнь":6,"июль":7,
+                  "август":8,"сентябрь":9,"октябрь":10,"ноябрь":11,"декабрь":12}
+        part = args[0].lower().replace("-", " ").split()
+        if not part or part[0] not in months:
+            await message.answer("❓ Примеры: /export week, /export month, /export Ноябрь-2026, /export 01.11.2026 21.11.2026"); return
+        import calendar
+        m = months[part[0]]; y = int(part[1]) if len(part) > 1 else now.year
+        sd = datetime(y, m, 1); ed = datetime(y, m, calendar.monthrange(y, m)[1])
+
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute("SELECT tg_id, date, metric, value FROM data").fetchall()
+    users = conn.execute("SELECT tg_id, full_name FROM users ORDER BY full_name").fetchall()
+    conn.close()
+    if target:
+        users = [u for u in users if u[0] == target]
+
+    store = {}
+    dates = set()
+    for tg_id, date, metric, value in rows:
+        d = datetime.strptime(date, "%d.%m.%Y")
+        if sd and not (sd <= d <= ed): continue
+        store.setdefault(tg_id, {}).setdefault(date, {})[metric] = int(value)
+        dates.add(date)
+    dates = sorted(dates, key=lambda s: datetime.strptime(s, "%d.%m.%Y"))
+    if not users or not dates:
+        await message.answer("📭 Нет данных за выбранный период."); return
+
+    wb = Workbook(); ws = wb.active; ws.title = "Отчет"
+    thin = Side(style="thin", color="FFFFFF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    head_fill = PatternFill("solid", fgColor="4472C4")
+    date_fill = PatternFill("solid", fgColor="2F5597")
+    white_bold = Font(bold=True, color="FFFFFF", size=12)
+
+    ws.cell(row=1, column=1, value="").fill = PatternFill("solid", fgColor="000000")
+    col = 2
+    for d in dates:
+        ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col+2)
+        c = ws.cell(row=1, column=col, value=d)
+        c.fill = date_fill; c.font = white_bold; c.alignment = Alignment(horizontal="center")
+        for i in range(3): ws.cell(row=1, column=col+i).border = border
+        col += 3
+
+    c = ws.cell(row=2, column=1, value="ФИО")
+    c.fill = head_fill; c.font = white_bold; c.border = border
+    col = 2
+    for d in dates:
+        for name in ("ДК", "ИДК", "Био"):
+            c = ws.cell(row=2, column=col, value=name)
+            c.fill = head_fill; c.font = white_bold
+            c.alignment = Alignment(horizontal="center"); c.border = border
+            col += 1
+
+    row = 3
+    for tg_id, full_name in users:
+        c = ws.cell(row=row, column=1, value=full_name)
+        c.font = Font(bold=True, size=12); c.border = border
+        col = 2
+        for d in dates:
+            v = store.get(tg_id, {}).get(d, {})
+            dk = f"{v.get('dk_zayavki', 0)}/{v.get('dk_vydacha', 0)}" if v and ('dk_zayavki' in v or 'dk_vydacha' in v) else ""
+            idk = f"{v.get('idk_zayavki', 0)}/{v.get('idk_vydacha', 0)}" if v and ('idk_zayavki' in v or 'idk_vydacha' in v) else ""
+            bio = v.get("bio", "") if v else ""
+            for i, val in enumerate((dk, idk, bio)):
+                c = ws.cell(row=row, column=col+i, value=val)
+                c.alignment = Alignment(horizontal="center"); c.border = border
+            col += 3
+        row += 1
+
+    ws.column_dimensions["A"].width = 25
+    for i in range(2, 2 + 3*len(dates)):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    ws.freeze_panes = "B3"
+
+    wb.save(EXCEL_FILE)
+    await message.answer_document(FSInputFile(EXCEL_FILE))
 
 def split_message(text, max_len=4000):
     parts = []
