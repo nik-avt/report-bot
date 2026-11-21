@@ -545,11 +545,11 @@ async def export_excel(message: Message):
             col += 3
         row += 1
 
-            max_name = max([len(u[1]) for u in users] + [3])
-            ws.column_dimensions["A"].width = min(max_name + 3, 45)
-            for i in range(2, 2 + 3*len(dates)):
-                ws.column_dimensions[get_column_letter(i)].width = 10
-            ws.freeze_panes = "B3"
+    max_name = max([len(u[1]) for u in users] + [3])
+        ws.column_dimensions["A"].width = min(max_name + 3, 45)
+    for i in range(2, 2 + 3*len(dates)):
+    ws.column_dimensions[get_column_letter(i)].width = 10
+    ws.freeze_panes = "B3"
 
     wb.save(EXCEL_FILE)
     await message.answer_document(FSInputFile(EXCEL_FILE))
