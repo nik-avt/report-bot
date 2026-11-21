@@ -543,6 +543,66 @@ async def user_export(callback: CallbackQuery):
         await callback.message.answer_document(FSInputFile(file_path), caption=f"📎 Отчёт по: {name}")
         os.remove(file_path); await callback.answer("✅ Выгружено")
     except Exception as e: await callback.message.answer(f"❌ Ошибка: {e}"); await callback.answer()
+# ===== ПОДСКАЗКИ КОМАНД (меню при вводе "/") =====
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+
+USER_COMMANDS = [
+    BotCommand(command="start", description="Регистрация в боте"),
+    BotCommand(command="help", description="Справка по командам"),
+]
+
+LEAD_COMMANDS = [
+    BotCommand(command="start", description="Регистрация в боте"),
+    BotCommand(command="export", description="📎 Excel-отчёт (week / month / период)"),
+    BotCommand(command="summary", description="📊 Сводка по команде"),
+    BotCommand(command="users", description="👥 Сотрудники: динамика и Excel"),
+    BotCommand(command="help", description="Справка по командам"),
+]
+
+ADMIN_COMMANDS = LEAD_COMMANDS + [
+    BotCommand(command="admin_records", description="🛠 Записи сотрудника (по ID)"),
+]
+
+async def setup_commands():
+    await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
+    for admin_id in ADMIN_IDS:
+        await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id))
+    for lead_id in LEAD_IDS:
+        await bot.set_my_commands(LEAD_COMMANDS, scope=BotCommandScopeChat(chat_id=lead_id))
+
+@router.message(Command("help"))
+async def help_cmd(message: Message):
+    role = get_role(message.from_user.id)
+    if role == "admin":
+        text = ("👨‍💻 **Команды админа:**\n\n"
+                "/start — регистрация\n"
+                "/export — Excel по всем (week / month / Ноябрь-2026 / 01.11.2026 21.11.2026)\n"
+                "/export user [ID] — отчёт одного сотрудника\n"
+                "/summary — сводка по команде (month / период)\n"
+                "/users — сотрудники + кнопки Динамика и Excel\n"
+                "/admin_records [ID] — записи сотрудника, правка и удаление\n"
+                "/help — эта справка")
+    elif role == "lead":
+        text = ("👔 **Команды руководителя:**\n\n"
+                "/start — регистрация\n"
+                "/export — Excel по всем (week / month / Ноябрь-2026 / 01.11.2026 21.11.2026)\n"
+                "/export user [ID] — отчёт одного сотрудника\n"
+                "/summary — сводка по команде (month / период)\n"
+                "/users — сотрудники + кнопки Динамика и Excel\n"
+                "/help — эта справка")
+    else:
+        text = ("👤 **Твои команды:**\n\n"
+                "/start — регистрация\n"
+                "📝 Внести данные — кнопка в меню\n"
+                "📊 Мои данные — сводка за неделю\n"
+                "✏️ Мои записи — правка и удаление своих записей\n"
+                "/help — эта справка")
+    await message.answer(text)
+
+async def main():
+    await setup_commands()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio; asyncio.run(dp.start_polling(bot))
+    import asyncio
+    asyncio.run(main())
