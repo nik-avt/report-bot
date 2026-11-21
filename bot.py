@@ -24,8 +24,9 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
 LEAD_IDS = [int(x) for x in os.getenv("LEAD_IDS", "").split(",") if x]
-DB_FILE = "bot.db"
-EXCEL_FILE = "report.xlsx"
+DATA_DIR = os.getenv("DATA_DIR", ".")
+DB_FILE = os.path.join(DATA_DIR, "bot.db")
+EXCEL_FILE = os.path.join(DATA_DIR, "report.xlsx")
 MSK = timezone(timedelta(hours=3))
 
 bot = Bot(token=BOT_TOKEN)
