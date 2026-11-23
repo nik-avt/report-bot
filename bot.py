@@ -552,6 +552,7 @@ def generate_excel(start_date=None, end_date=None):
     wb.save(EXCEL_FILE)
     return EXCEL_FILE
 # ===== ОБРАБОТЧИК /summary С КНОПКАМИ =====
+# ===== ОБРАБОТЧИК /summary С КНОПКАМИ =====
 @router.message(Command("summary"))
 async def summary_cmd(message: Message):
     if get_role(message.from_user.id) not in ("admin", "lead"):
@@ -563,12 +564,17 @@ async def summary_cmd(message: Message):
          InlineKeyboardButton(text="📅 Вчера", callback_data="sum_yesterday")],
         [InlineKeyboardButton(text="📆 Неделя", callback_data="sum_week"),
          InlineKeyboardButton(text="📆 Месяц", callback_data="sum_month")],
-        [InlineKeyboardButton(text="🗓 Свой период", callback_data="sum_custom")]
+        [InlineKeyboardButton(text="📅 Конкретная дата", callback_data="sum_single"),
+         InlineKeyboardButton(text="🗓 Свой период", callback_data="sum_custom")]
     ])
     await message.answer("📊 Выбери период для сводки:", reply_markup=keyboard)
 
+
 # ===== ОБРАБОТЧИКИ КНОПОК ПЕРИОДА =====
-@router.callback_query(F.data.in_({"sum_today", "sum_yesterday", "sum_week", "sum_month"}))
+@router.callback_query(F.data == "sum_today")
+@router.callback_query(F.data == "sum_yesterday")
+@router.callback_query(F.data == "sum_week")
+@router.callback_query(F.data == "sum_month")
 async def summary_period_cb(callback: CallbackQuery):
     if get_role(callback.from_user.id) not in ("admin", "lead"):
         await callback.answer("⛔ Нет доступа.")
@@ -589,7 +595,19 @@ async def summary_period_cb(callback: CallbackQuery):
     await callback.answer()
     await send_summary_text(callback, start, end)
 
-# ===== ОБРАБОТЧИКИ "СВОЙ ПЕРИОД" =====
+
+# ===== КОНКРЕТНАЯ ДАТА =====
+@router.callback_query(F.data == "sum_single")
+async def summary_single_cb(callback: CallbackQuery):
+    if get_role(callback.from_user.id) not in ("admin", "lead"):
+        await callback.answer("⛔ Нет доступа.")
+        return
+    await callback.message.edit_text("📅 Введи дату (ДД.ММ.ГГГГ):")
+    await callback.answer()
+    await callback.state.set_state(InputState.summary_start_date)
+
+
+# ===== СВОЙ ПЕРИОД =====
 @router.callback_query(F.data == "sum_custom")
 async def summary_custom_cb(callback: CallbackQuery):
     if get_role(callback.from_user.id) not in ("admin", "lead"):
@@ -599,16 +617,28 @@ async def summary_custom_cb(callback: CallbackQuery):
     await callback.answer()
     await callback.state.set_state(InputState.summary_start_date)
 
+
+# ===== ОБРАБОТЧИК ВВОДА ДАТЫ =====
 @router.message(InputState.summary_start_date)
 async def summary_start_handler(message: Message, state: FSMContext):
     try:
         datetime.strptime(message.text.strip(), "%d.%m.%Y")
         await state.update_data(start_date=message.text.strip())
-        await message.answer("📅 Теперь введи конечную дату (ДД.ММ.ГГГГ):")
-        await state.set_state(InputState.summary_end_date)
+        data = await state.get_data()
+        # Если это "конкретная дата" — сразу считаем, иначе просим конечную
+        if data.get("is_single"):
+            start = message.text.strip()
+            await state.clear()
+            await message.answer(f"📊 Считаю сводку за {start}...")
+            await send_summary_text(message, start, start)
+        else:
+            await message.answer("📅 Теперь введи конечную дату (ДД.ММ.ГГГГ):")
+            await state.set_state(InputState.summary_end_date)
     except ValueError:
         await message.answer("❌ Неверный формат. Пример: 01.11.2026. Попробуй ещё раз:")
 
+
+# ===== ОБРАБОТЧИК ВВОДА КОНЕЧНОЙ ДАТЫ =====
 @router.message(InputState.summary_end_date)
 async def summary_end_handler(message: Message, state: FSMContext):
     try:
@@ -620,7 +650,6 @@ async def summary_end_handler(message: Message, state: FSMContext):
         await send_summary_text(message, start, end)
     except ValueError:
         await message.answer("❌ Неверный формат. Пример: 21.11.2026. Попробуй ещё раз:")
-
 # ===== СПИСОК ПОЛЬЗОВАТЕЛЕЙ И ДИНАМИКА =====
 @router.message(Command("users"))
 async def list_users(message: Message):
@@ -760,4 +789,5 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
+
 
