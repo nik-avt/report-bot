@@ -8,12 +8,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton,ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery
+    Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, CallbackQuery,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 )
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter  # ВАЖНО для сложной шапки
+from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 
 # ===== ЛОГИРОВАНИЕ И НАСТРОЙКИ =====
@@ -43,14 +44,16 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, date TEXT, 
         metric TEXT, value REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(tg_id) REFERENCES users(tg_id))""")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 init_db()
 
 def get_user(tg_id):
     conn = sqlite3.connect(DB_FILE)
     user = conn.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
-    conn.close(); return user
+    conn.close()
+    return user
 
 def get_role(tg_id):
     if tg_id in ADMIN_IDS: return "admin"
@@ -66,8 +69,13 @@ METRICS_ORDER = [
 METRIC_NAMES = {v: k for k, v in METRICS_ORDER}
 
 class InputState(StatesGroup):
-    waiting_name = State(); waiting_date = State(); waiting_value = State()
-    final_confirm = State(); editing = State()
+    waiting_name = State()
+    waiting_date = State()
+    waiting_value = State()
+    final_confirm = State()
+    editing = State()
+    summary_start_date = State()   # Добавлено для кастомного периода
+    summary_end_date = State()     # Добавлено для кастомного периода
 
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
@@ -80,7 +88,8 @@ def main_menu():
 async def cmd_start(message: Message, state: FSMContext):
     logger.info(f"Пользователь {message.from_user.id} ({message.from_user.username}) нажал /start")
     user = get_user(message.from_user.id)
-    if user: await message.answer(f"Привет, {user[1]}! 👋", reply_markup=main_menu())
+    if user:
+        await message.answer(f"Привет, {user[1]}! 👋", reply_markup=main_menu())
     else:
         await message.answer("Привет! Введи свои ФИО для регистрации:")
         await state.set_state(InputState.waiting_name)
@@ -88,36 +97,43 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.message(InputState.waiting_name)
 async def save_name(message: Message, state: FSMContext):
     if message.text.strip().startswith("/"):
-        await message.answer("❗ Это команда, а не имя. Введи ФИО обычным текстом:"); return
+        await message.answer("❗ Это команда, а не имя. Введи ФИО обычнымا текстом:")
+        return
     conn = sqlite3.connect(DB_FILE)
     conn.execute("INSERT INTO users (tg_id, full_name) VALUES (?, ?)", (message.from_user.id, message.text.strip()))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     await state.clear()
     await message.answer(f"✅ Зарегистрирован: {message.text}", reply_markup=main_menu())
 
 @router.message(F.text == "📝 Внести данные")
 async def start_input(message: Message, state: FSMContext):
     if not get_user(message.from_user.id):
-        await message.answer("Сначала зарегистрируйся: /start"); return
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
     await message.answer("📅 Введи дату (ДД.ММ.ГГГГ) или напиши 'сегодня' / 'вчера':",
                          reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="сегодня")], [KeyboardButton(text="вчера")]], resize_keyboard=True))
     await state.set_state(InputState.waiting_date)
 
 @router.message(InputState.waiting_date)
 async def get_date(message: Message, state: FSMContext):
-    text = message.text.strip().lower(); now = datetime.now(MSK)
-    if text == "сегодня": date_str = now.strftime("%d.%m.%Y")
-    elif text == "вчера": date_str = (now - timedelta(days=1)).strftime("%d.%m.%Y")
+    text = message.text.strip().lower()
+    now = datetime.now(MSK)
+    if text == "сегодня":
+        date_str = now.strftime("%d.%m.%Y")
+    elif text == "вчера":
+        date_str = (now - timedelta(days=1)).strftime("%d.%m.%Y")
     else:
         try:
             parsed = datetime.strptime(text, "%d.%m.%Y")
             if parsed.replace(tzinfo=MSK) > now.replace(hour=23, minute=59, second=59):
-                await message.answer("❌ Дата не может быть в будущем."); return
+                await message.answer("❌ Дата не может быть в будущем.")
+                return
             date_str = parsed.strftime("%d.%m.%Y")
         except ValueError:
-            await message.answer("❌ Формат ДД.ММ.ГГГГ:"); return
+            await message.answer("❌ Формат ДД.ММ.ГГГГ:")
+            return
 
-    # Проверка существующих данных для замены
     conn = sqlite3.connect(DB_FILE)
     existing = conn.execute("SELECT metric, value FROM data WHERE tg_id = ? AND date = ?", (message.from_user.id, date_str)).fetchall()
     conn.close()
@@ -136,9 +152,12 @@ async def get_value(message: Message, state: FSMContext):
     text = message.text.strip().replace(",", ".")
     try:
         value = float(text)
-        if value < 0: await message.answer("❌ Значение не может быть отрицательным."); return
+        if value < 0:
+            await message.answer("❌ Значение не может быть отрицательным.")
+            return
     except ValueError:
-        await message.answer("❌ Введи число:"); return
+        await message.answer("❌ Введи число:")
+        return
     
     data = await state.get_data()
     metric_index = data["metric_index"]
@@ -146,10 +165,14 @@ async def get_value(message: Message, state: FSMContext):
     values = data.get("values", {})
     
     if metric_key == "dk_vydacha" and value > values.get("dk_zayavki", 0):
-        await message.answer(f"⚠️ ДК выдача ({int(value)}) > ДК заявок ({int(values.get('dk_zayavki',0))}). Выдача не может быть больше заявок. Введи ≤ {int(values.get('dk_zayavki',0))}:"); return
+        await message.answer(f"⚠️ ДК выдача ({int(value)}) > ДК заявок ({int(values.get('dk_zayavki',0))}). Выдача не может быть больше заявок. Введи ≤ {int(values.get('dk_zayavki',0))}:")
+        return
     if metric_key == "idk_vydacha" and value > values.get("idk_zayavki", 0):
-        await message.answer(f"⚠️ ИДК выдача ({int(value)}) > ИДК заявок ({int(values.get('idk_zayavki',0))}). Выдача не может быть больше заявок. Введи ≤ {int(values.get('idk_zayavki',0))}:"); return
-    values[metric_key] = value; await state.update_data(values=values)
+        await message.answer(f"⚠️ ИДК выдача ({int(value)}) > ИДК заявок ({int(values.get('idk_zayavki',0))}). Выдача не может быть больше заявок. Введи ≤ {int(values.get('idk_zayavki',0))}:")
+        return
+        
+    values[metric_key] = value
+    await state.update_data(values=values)
     metric_index += 1
 
     if metric_index < len(METRICS_ORDER):
@@ -157,46 +180,63 @@ async def get_value(message: Message, state: FSMContext):
         metric_label, _ = METRICS_ORDER[metric_index]
         step_names = ["2️⃣", "3️⃣", "4️⃣", "5️⃣"]
         await message.answer(f"{step_names[metric_index - 1]} Введи: {metric_label}")
-    else: await show_final_confirm(message, state, values)
+    else:
+        await show_final_confirm(message, state, values)
 
 async def show_final_confirm(message: Message, state: FSMContext, values: dict):
-    data = await state.get_data(); date_str = data["date"]; is_replace = data.get("is_replace", False)
+    data = await state.get_data()
+    date_str = data["date"]
+    is_replace = data.get("is_replace", False)
     question = "⚠️ Старые данные за эту дату будут заменены. Продолжить?" if is_replace else "Сохранить?"
     save_label = "💾 Заменить" if is_replace else "💾 Сохранить"
     text = (f"📋 Данные за {date_str}:\n\n"
             f"🔹 ДК: {int(values.get('dk_zayavki', 0))}(заявки) / {int(values.get('dk_vydacha', 0))}(выдано)\n"
             f"🔹 ИДК: {int(values.get('idk_zayavki', 0))}(заявки) / {int(values.get('idk_vydacha', 0))}(выдано)\n"
             f"🔹 Био: {int(values.get('bio', 0))}\n\n{question}")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=save_label, callback_data="save_all"), InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_all")]])
-    await message.answer(text, reply_markup=keyboard); await state.set_state(InputState.final_confirm)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=save_label, callback_data="save_all"), 
+         InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_all")]
+    ])
+    await message.answer(text, reply_markup=keyboard)
+    await state.set_state(InputState.final_confirm)
 
 @router.callback_query(F.data == "save_all", InputState.final_confirm)
 async def save_all(callback: CallbackQuery, state: FSMContext):
-    await callback.answer(); data = await state.get_data()
-    date_str = data["date"]; values = data.get("values", {}); is_replace = data.get("is_replace", False)
+    await callback.answer()
+    data = await state.get_data()
+    date_str = data["date"]
+    values = data.get("values", {})
+    is_replace = data.get("is_replace", False)
     conn = sqlite3.connect(DB_FILE)
     for metric_key, value in values.items():
         cur = conn.execute("UPDATE data SET value = ? WHERE tg_id = ? AND date = ? AND metric = ?", (value, callback.from_user.id, date_str, metric_key))
-        if cur.rowcount == 0: conn.execute("INSERT INTO data (tg_id, date, metric, value) VALUES (?, ?, ?, ?)", (callback.from_user.id, date_str, metric_key, value))
-    conn.commit(); conn.close(); await state.clear()
+        if cur.rowcount == 0:
+            conn.execute("INSERT INTO data (tg_id, date, metric, value) VALUES (?, ?, ?, ?)", (callback.from_user.id, date_str, metric_key, value))
+    conn.commit()
+    conn.close()
+    await state.clear()
     msg = f"✅ Данные за {date_str} заменены!" if is_replace else f"✅ Сохранено за {date_str}!"
     await callback.message.answer(msg, reply_markup=main_menu())
 
 @router.callback_query(F.data == "cancel_all", InputState.final_confirm)
 async def cancel_all(callback: CallbackQuery, state: FSMContext):
-    await callback.answer("❌ Отменено"); await state.clear()
+    await callback.answer("❌ Отменено")
+    await state.clear()
     await callback.message.answer("Ввод отменён.", reply_markup=main_menu())
 
 # ===== ПРОСМОТР И РЕДАКТИРОВАНИЕ =====
 @router.message(F.text == "📊 Мои данные")
 async def my_data(message: Message):
     user = get_user(message.from_user.id)
-    if not user: await message.answer("Сначала зарегистрируйся: /start"); return
+    if not user:
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
     conn = sqlite3.connect(DB_FILE)
     week_ago = (datetime.now(MSK) - timedelta(days=7)).strftime("%d.%m.%Y")
     today = datetime.now(MSK).strftime("%d.%m.%Y")
     rows = conn.execute("SELECT metric, SUM(value) FROM data WHERE tg_id = ? AND date BETWEEN ? AND ? GROUP BY metric", (message.from_user.id, week_ago, today)).fetchall()
-    conn.close(); d = {m: int(v) for m, v in rows}
+    conn.close()
+    d = {m: int(v) for m, v in rows}
     text = (f"📊 {user[1]}, сводка за неделю:\n\n"
             f"🔹 ДК: {d.get('dk_zayavki', 0)}(заявки) / {d.get('dk_vydacha', 0)}(выдано)\n"
             f"🔹 ИДК: {d.get('idk_zayavki', 0)}(заявки) / {d.get('idk_vydacha', 0)}(выдано)\n"
@@ -208,29 +248,48 @@ async def show_my_records(message: Message):
     conn = sqlite3.connect(DB_FILE)
     rows = conn.execute("SELECT id, date, metric, value FROM data WHERE tg_id = ? ORDER BY created_at DESC LIMIT 5", (message.from_user.id,)).fetchall()
     conn.close()
-    if not rows: await message.answer("📭 Записей нет."); return
-    text = "📝 Твои последние 5 записей:\n\n"; keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    if not rows:
+        await message.answer("📭 Записей нет.")
+        return
+    text = "📝 Твои последние 5 записей:\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for row in rows:
-        rec_id, date, metric, value = row; metric_name = METRIC_NAMES.get(metric, metric)
-        v = int(value) if value == int(value) else value; text += f"• {date} | {metric_name}: {v}\n"
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"✏️ {date} {metric_name}", callback_data=f"edit_{rec_id}"), InlineKeyboardButton(text="🗑️", callback_data=f"delete_{rec_id}")])
+        rec_id, date, metric, value = row
+        metric_name = METRIC_NAMES.get(metric, metric)
+        v = int(value) if value == int(value) else value
+        text += f"• {date} | {metric_name}: {v}\n"
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"✏️ {date} {metric_name}", callback_data=f"edit_{rec_id}"), 
+            InlineKeyboardButton(text="🗑️", callback_data=f"delete_{rec_id}")
+        ])
     await message.answer(text, reply_markup=keyboard)
 
 @router.callback_query(F.data.startswith("edit_"))
 async def start_edit(callback: CallbackQuery, state: FSMContext):
     rec_id = int(callback.data.replace("edit_", ""))
     await state.update_data(edit_id=rec_id, is_admin_edit=False)
-    await callback.message.answer("Введи новое значение:"); await state.set_state(InputState.editing); await callback.answer()
+    await callback.message.answer("Введи новое значение:")
+    await state.set_state(InputState.editing)
+    await callback.answer()
 
 @router.message(InputState.editing)
 async def save_edit(message: Message, state: FSMContext):
-    try: value = float(message.text.replace(",", "."))
-    except ValueError: await message.answer("❌ Введи число:"); return
-    data = await state.get_data(); rec_id = data.get("edit_id"); is_admin = data.get("is_admin_edit", False)
+    try:
+        value = float(message.text.replace(",", "."))
+    except ValueError:
+        await message.answer("❌ Введи число:")
+        return
+    data = await state.get_data()
+    rec_id = data.get("edit_id")
+    is_admin = data.get("is_admin_edit", False)
     conn = sqlite3.connect(DB_FILE)
-    if is_admin: cursor = conn.execute("UPDATE data SET value = ? WHERE id = ?", (value, rec_id))
-    else: cursor = conn.execute("UPDATE data SET value = ? WHERE id = ? AND tg_id = ?", (value, rec_id, message.from_user.id))
-    conn.commit(); conn.close(); await state.clear()
+    if is_admin:
+        cursor = conn.execute("UPDATE data SET value = ? WHERE id = ?", (value, rec_id))
+    else:
+        cursor = conn.execute("UPDATE data SET value = ? WHERE id = ? AND tg_id = ?", (value, rec_id, message.from_user.id))
+    conn.commit()
+    conn.close()
+    await state.clear()
     v = int(value) if value == int(value) else value
     await message.answer(f"✅ Обновлено: {v}", reply_markup=main_menu() if not is_admin else None)
 
@@ -239,360 +298,501 @@ async def delete_record(callback: CallbackQuery):
     rec_id = int(callback.data.replace("delete_", ""))
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.execute("DELETE FROM data WHERE id = ? AND tg_id = ?", (rec_id, callback.from_user.id))
-    conn.commit(); conn.close(); await callback.answer("🗑️ Удалено")
+    conn.commit()
+    conn.close()
+    await callback.answer("🗑️ Удалено")
     await callback.message.edit_text("✅ Запись удалена." if cursor.rowcount > 0 else "⚠️ Не найдена.")
 
 # ===== АДМИН ФУНКЦИИ =====
 @router.message(Command("admin_records"))
 async def admin_records(message: Message):
-    if get_role(message.from_user.id) != "admin": await message.answer("⛔ Только админ."); return
+    if get_role(message.from_user.id) != "admin":
+        await message.answer("⛔ Только админ.")
+        return
     args = message.text.split(maxsplit=1)
-    if len(args) < 2: await message.answer("Использование: /admin_records [Telegram ID]\nПример: /admin_records 123456789"); return
-    target_id = int(args[1]); user = get_user(target_id)
-    if not user: await message.answer("❌ Пользователь не найден."); return
+    if len(args) < 2:
+        await message.answer("Использование: /admin_records [Telegram ID]\nПример: /admin_records 123456789")
+        return
+    target_id = int(args[1])
+    user = get_user(target_id)
+    if not user:
+        await message.answer("❌ Пользователь не найден.")
+        return
     conn = sqlite3.connect(DB_FILE)
     rows = conn.execute("SELECT id, date, metric, value FROM data WHERE tg_id = ? ORDER BY created_at DESC LIMIT 10", (target_id,)).fetchall()
     conn.close()
-    if not rows: await message.answer(f"📭 У {user[1]} нет записей."); return
-    text = f"📝 Последние записи {user[1]}:\n\n"; keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    if not rows:
+        await message.answer(f"📭 У {user[1]} нет записей.")
+        return
+    text = f"📝 Последние записи {user[1]}:\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for row in rows:
-        rec_id, date, metric, value = row; metric_name = METRIC_NAMES.get(metric, metric)
-        v = int(value) if value == int(value) else value; text += f"• {date} | {metric_name}: {v}\n"
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text=f"✏️ {date} {metric_name}", callback_data=f"admin_edit_{rec_id}"), InlineKeyboardButton(text="🗑️", callback_data=f"admin_delete_{rec_id}")])
+        rec_id, date, metric, value = row
+        metric_name = METRIC_NAMES.get(metric, metric)
+        v = int(value) if value == int(value) else value
+        text += f"• {date} | {metric_name}: {v}\n"
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(text=f"✏️ {date} {metric_name}", callback_data=f"admin_edit_{rec_id}"), 
+            InlineKeyboardButton(text="🗑️", callback_data=f"admin_delete_{rec_id}")
+        ])
     await message.answer(text, reply_markup=keyboard)
+
 @router.message(Command("del_user"))
 async def del_user(message: Message):
     if get_role(message.from_user.id) != "admin":
-        await message.answer("⛔ Только админ."); return
+        await message.answer("⛔ Только админ.")
+        return
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Используй: /del_user [ID]"); return
+        await message.answer("Используй: /del_user [ID]")
+        return
     tid = int(args[1])
     conn = sqlite3.connect(DB_FILE)
     conn.execute("DELETE FROM data WHERE tg_id = ?", (tid,))
     conn.execute("DELETE FROM users WHERE tg_id = ?", (tid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     await message.answer(f"🗑 Пользователь {tid} и все его записи удалены.")
 
 @router.callback_query(F.data.startswith("admin_edit_"))
 async def admin_start_edit(callback: CallbackQuery, state: FSMContext):
-    if get_role(callback.from_user.id) != "admin": await callback.answer("⛔ Только админ."); return
+    if get_role(callback.from_user.id) != "admin":
+        await callback.answer("⛔ Только админ.")
+        return
     rec_id = int(callback.data.replace("admin_edit_", ""))
     await state.update_data(edit_id=rec_id, is_admin_edit=True)
-    await callback.message.answer("Введи новое значение:"); await state.set_state(InputState.editing); await callback.answer()
+    await callback.message.answer("Введи новое значение:")
+    await state.set_state(InputState.editing)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_delete_"))
 async def admin_delete_record(callback: CallbackQuery):
-    if get_role(callback.from_user.id) != "admin": await callback.answer("⛔ Только админ."); return
+    if get_role(callback.from_user.id) != "admin":
+        await callback.answer("⛔ Только админ.")
+        return
     rec_id = int(callback.data.replace("admin_delete_", ""))
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.execute("DELETE FROM data WHERE id = ?", (rec_id,))
-    conn.commit(); conn.close(); await callback.answer("🗑️ Удалено")
+    conn.commit()
+    conn.close()
+    await callback.answer("🗑️ Удалено")
     await callback.message.edit_text("✅ Запись удалена." if cursor.rowcount > 0 else "⚠️ Не найдена.")
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ДАТ =====
-def parse_date_range(args_str):
-    now = datetime.now(MSK)
-    if not args_str or args_str.strip() == '': return None, None
-    args_str = args_str.strip().lower()
-    if args_str == 'week': return (now - timedelta(days=6)).strftime("%d.%m.%Y"), now.strftime("%d.%m.%Y")
-    if args_str == 'month': return now.replace(day=1).strftime("%d.%m.%Y"), now.strftime("%d.%m.%Y")
-    if '-' in args_str and '.' not in args_str:
-        try: dt = datetime.strptime(args_str, "%B-%Y")
-        except ValueError:
-            ru_months = {'январь': 'January', 'февраль': 'February', 'март': 'March', 'апрель': 'April', 'май': 'May', 'июнь': 'June', 'июль': 'July', 'август': 'August', 'сентябрь': 'September', 'октябрь': 'October', 'ноябрь': 'November', 'декабрь': 'December'}
-            try:
-                month_ru, year = args_str.split('-', 1); dt = datetime.strptime(f"{ru_months[month_ru]}-{year}", "%B-%Y")
-            except: return None, None
-        start = dt.replace(day=1).strftime("%d.%m.%Y")
-        last_day = (dt.replace(month=dt.month % 12 + 1, day=1, year=dt.year + (1 if dt.month == 12 else 0)) - timedelta(days=1))
-        return start, last_day.strftime("%d.%m.%Y")
-    parts = args_str.split()
-    if len(parts) == 2:
-        try:
-            s, e = datetime.strptime(parts[0], "%d.%m.%Y"), datetime.strptime(parts[1], "%d.%m.%Y")
-            if s > e: s, e = e, s; return s.strftime("%d.%m.%Y"), e.strftime("%d.%m.%Y")
-        except ValueError: pass
-    try: dt = datetime.strptime(args_str, "%d.%m.%Y"); return dt.strftime("%d.%m.%Y"), dt.strftime("%d.%m.%Y")
-    except ValueError: return None, None
-
 def filter_data_by_date(all_data, start_date, end_date):
-    if not start_date or not end_date: return all_data
-    def to_cmp(d): p = d.split('.'); return f"{p[2]}-{p[1]}-{p[0]}"
-    s, e = to_cmp(start_date), to_cmp(end_date)
-    return [row for row in all_data if s <= to_cmp(row[1]) <= e]
+    if not start_date or not end_date:
+        return all_data
+    
+    def to_cmp(d):
+        try:
+            p = str(d).split('.')
+            if len(p) == 3:
+                return f"{p[2]}-{p[1]}-{p[0]}"
+        except:
+            pass
+        return str(d)
+    
+    s_cmp, e_cmp = to_cmp(start_date), to_cmp(end_date)
+    # В generate_excel_for_user дата лежит в row[0]
+    return [row for row in all_data if s_cmp <= to_cmp(row[0]) <= e_cmp]
 
-# ===== ГЕНЕРАЦИЯ EXCEL (ФИНАЛЬНАЯ ВЕРСИЯ) =====
+# ===== ГЕНЕРАЦИЯ EXCEL =====
 def generate_excel(start_date=None, end_date=None):
     conn = sqlite3.connect(DB_FILE)
     users = conn.execute("SELECT tg_id, full_name FROM users ORDER BY full_name").fetchall()
     all_data = conn.execute("SELECT tg_id, date, metric, value FROM data").fetchall()
     conn.close()
     
-    clean_data = []; valid_dates_set = set()
+    clean_data = []
+    valid_dates_set = set()
     for tg_id, date_str, metric, value in all_data:
         try:
             dt = datetime.strptime(date_str, "%d.%m.%Y")
-            if dt.year < 2020 or dt > datetime.now() + timedelta(days=1): continue
+            if dt.year < 2020 or dt > datetime.now() + timedelta(days=1):
+                continue
             if start_date and end_date:
-                s = datetime.strptime(start_date, "%d.%m.%Y"); e = datetime.strptime(end_date, "%d.%m.%Y")
-                if not (s <= dt <= e): continue
-            clean_data.append((tg_id, date_str, metric, value)); valid_dates_set.add(date_str)
-        except ValueError: continue
-    if not clean_data: return None
+                s = datetime.strptime(start_date, "%d.%m.%Y")
+                e = datetime.strptime(end_date, "%d.%m.%Y")
+                if not (s <= dt <= e):
+                    continue
+            clean_data.append((tg_id, date_str, metric, value))
+            valid_dates_set.add(date_str)
+        except ValueError:
+            continue
+            
+    if not clean_data:
+        return None
     
-    wb = Workbook(); wb.remove(wb.active)
+    wb = Workbook()
+    wb.remove(wb.active)
     sorted_dates = sorted(list(valid_dates_set), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
     ws = wb.create_sheet(title="Отчет")
     
     header_font = Font(bold=True, size=11, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     subheader_fill = PatternFill(start_color="5B9BD5", end_color="5B9BD5", fill_type="solid")
-    total_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
-    total_font = Font(bold=True, size=11)
     user_fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
     current_row = 1
-    col_idx = 2 # Инициализация для ширины столбцов
+    col_idx = 2
     
     for tg_id, full_name in users:
         user_has_data = any(d[0] == tg_id for d in clean_data)
-        if not user_has_data: continue
+        if not user_has_data:
+            continue
         
-        last_col_idx = len(sorted_dates) * 3 + 1; last_col_letter = get_column_letter(last_col_idx)
+        last_col_idx = len(sorted_dates) * 3 + 1
+        last_col_letter = get_column_letter(last_col_idx)
         ws.merge_cells(f'A{current_row}:{last_col_letter}{current_row}')
-        name_cell = ws[f'A{current_row}']; name_cell.value = full_name
-        name_cell.font = Font(bold=True, size=12); name_cell.fill = user_fill
-        name_cell.border = thin_border; name_cell.alignment = Alignment(horizontal="left", vertical="center")
+        name_cell = ws[f'A{current_row}']
+        name_cell.value = full_name
+        name_cell.font = Font(bold=True, size=12)
+        name_cell.fill = user_fill
+        name_cell.border = thin_border
+        name_cell.alignment = Alignment(horizontal="left", vertical="center")
         current_row += 1
         
         ws.cell(row=current_row, column=1).value = "Показатель"
-        ws.cell(row=current_row, column=1).font = header_font; ws.cell(row=current_row, column=1).fill = header_fill
-        ws.cell(row=current_row, column=1).border = thin_border; ws.cell(row=current_row+1, column=1).border = thin_border 
+        ws.cell(row=current_row, column=1).font = header_font
+        ws.cell(row=current_row, column=1).fill = header_fill
+        ws.cell(row=current_row, column=1).border = thin_border
+        ws.cell(row=current_row+1, column=1).border = thin_border 
         
         col_idx = 2
         for date_str in sorted_dates:
-            start_l = get_column_letter(col_idx); end_l = get_column_letter(col_idx + 2)
+            start_l = get_column_letter(col_idx)
+            end_l = get_column_letter(col_idx + 2)
             ws.merge_cells(f'{start_l}{current_row}:{end_l}{current_row}')
-            d_cell = ws[f'{start_l}{current_row}']; d_cell.value = date_str
-            d_cell.font = header_font; d_cell.fill = header_fill
-            d_cell.alignment = Alignment(horizontal="center"); d_cell.border = thin_border
+            d_cell = ws[f'{start_l}{current_row}']
+            d_cell.value = date_str
+            d_cell.font = header_font
+            d_cell.fill = header_fill
+            d_cell.alignment = Alignment(horizontal="center")
+            d_cell.border = thin_border
             
             subs = ["ДК", "ИДК", "Био"]
             for i, s in enumerate(subs):
-                c = ws.cell(row=current_row+1, column=col_idx+i); c.value = s
-                c.font = Font(bold=True, size=10, color="FFFFFF"); c.fill = subheader_fill
-                c.alignment = Alignment(horizontal="center"); c.border = thin_border
+                c = ws.cell(row=current_row+1, column=col_idx+i)
+                c.value = s
+                c.font = Font(bold=True, size=10, color="FFFFFF")
+                c.fill = subheader_fill
+                c.alignment = Alignment(horizontal="center")
+                c.border = thin_border
             col_idx += 3
         current_row += 2
         
         u_data = {}
         for tid, d, m, v in clean_data:
-            if tid == tg_id: u_data.setdefault(d, {})[m] = u_data.get(d, {}).get(m, 0) + v
+            if tid == tg_id:
+                u_data.setdefault(d, {})[m] = u_data.get(d, {}).get(m, 0) + v
         
         metrics_map = [("ДК (заяв/выд)", 'dk_zayavki', 'dk_vydacha', 0), ("ИДК (заяв/выд)", 'idk_zayavki', 'idk_vydacha', 1), ("Био", 'bio', None, 2)]
         rows_offset = 0
         for label, m1, m2, col_offset in metrics_map:
             r = current_row + rows_offset
-            c = ws.cell(row=r, column=1); c.value = label; c.fill = user_fill; c.border = thin_border
+            c = ws.cell(row=r, column=1)
+            c.value = label
+            c.fill = user_fill
+            c.border = thin_border
             
             date_col_start = 2
             for date_str in sorted_dates:
-                dd = u_data.get(date_str, {}); target_col = date_col_start + col_offset
+                dd = u_data.get(date_str, {})
+                target_col = date_col_start + col_offset
                 if m2:
-                    v1 = int(dd.get(m1, 0)); v2 = int(dd.get(m2, 0))
+                    v1 = int(dd.get(m1, 0))
+                    v2 = int(dd.get(m2, 0))
                     val = f"{v1}/{v2}" if (v1 or v2) else "-"
                 else:
-                    v1 = int(dd.get(m1, 0)); val = str(v1) if v1 else "-"
+                    v1 = int(dd.get(m1, 0))
+                    val = str(v1) if v1 else "-"
                 
-                cell = ws.cell(row=r, column=target_col); cell.value = val
-                cell.alignment = Alignment(horizontal="center"); cell.border = thin_border
+                cell = ws.cell(row=r, column=target_col)
+                cell.value = val
+                cell.alignment = Alignment(horizontal="center")
+                cell.border = thin_border
                 date_col_start += 3
             rows_offset += 1
-        current_row += 3; ws.row_dimensions[current_row].height = 4; current_row += 1
+        current_row += 3
+        ws.row_dimensions[current_row].height = 4
+        current_row += 1
 
     ws.column_dimensions['A'].width = 22
-    for i in range(2, col_idx): ws.column_dimensions[get_column_letter(i)].width = 8
-    wb.save(EXCEL_FILE); return EXCEL_FILE
+    for i in range(2, col_idx):
+        ws.column_dimensions[get_column_letter(i)].width = 8
+        
+    wb.save(EXCEL_FILE)
+    return EXCEL_FILE
 
 def generate_excel_for_user(tg_id, start_date=None, end_date=None):
     conn = sqlite3.connect(DB_FILE)
     user = conn.execute("SELECT full_name FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
     all_data = conn.execute("SELECT date, metric, value FROM data WHERE tg_id = ?", (tg_id,)).fetchall()
     conn.close()
-    if not user or not all_data: return None, None
+    if not user or not all_data:
+        return None, None
+        
     all_data = filter_data_by_date(all_data, start_date, end_date)
-    if not all_data: return None, None
+    if not all_data:
+        return None, None
     
-    wb = Workbook(); ws = wb.active; ws.title = f"{user[0]}"[:31]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{user[0]}"[:31]
     header_font = Font(bold=True, size=11, color="FFFFFF")
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     
     dates = sorted(set(row[0] for row in all_data), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
     ws.append(["Показатель"] + [datetime.strptime(d, "%d.%m.%Y").day for d in dates])
-    for cell in ws[1]: cell.font = header_font; cell.fill = header_fill; cell.alignment = Alignment(horizontal="center"); cell.border = thin_border
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = thin_border
     
-    metrics_map = {}; 
-    for date, metric, value in all_data: metrics_map.setdefault(metric, {})[date] = metrics_map.get(metric, {}).get(date, 0) + value
+    metrics_map = {}
+    for date, metric, value in all_data:
+        metrics_map.setdefault(metric, {})[date] = metrics_map.get(metric, {}).get(date, 0) + value
     
     row_idx = 2
     for label, key in METRICS_ORDER:
         row = [label] + [int(metrics_map.get(key, {}).get(d, 0)) for d in dates]
         ws.append(row)
-        for cell in ws[row_idx]: cell.border = thin_border; cell.alignment = Alignment(horizontal="center")
+        for cell in ws[row_idx]:
+            cell.border = thin_border
+            cell.alignment = Alignment(horizontal="center")
         row_idx += 1
+        
     ws.column_dimensions['A'].width = 18
     for i in range(2, 2 + len(dates)):
         col_letter = chr(64 + i) if i <= 26 else chr(64 + (i-1)//26) + chr(65 + (i-1)%26)
         ws.column_dimensions[col_letter].width = 6
     
     filename = f"report_{user[0].replace(' ', '_')}_{datetime.now().strftime('%d%m%Y')}.xlsx"
-    wb.save(filename); return filename, user[0]
+    wb.save(filename)
+    return filename, user[0]
 
-# ===== КОМАНДЫ ЭКСПОРТА И СВОДКИ =====
+# ===== КОМАНДЫ ЭКСПОРТА =====
 @router.message(Command("export"))
 async def export_excel(message: Message):
     role = get_role(message.from_user.id)
     if role not in ("admin", "lead"):
-        await message.answer("⛔ Только руководитель или админ."); return
+        await message.answer("⛔ Только руководитель или админ.")
+        return
 
     args = message.text.split()[1:]
     target = None
     if args and args[0].lower() == "user":
         if len(args) < 2:
-            await message.answer("❓ Укажи ID: /export user 123456789 [week|month]"); return
-        target = int(args[1]); args = args[2:]
+            await message.answer("❓ Укажи ID: /export user 123456789 [week|month]")
+            return
+        target = int(args[1])
+        args = args[2:]
 
     now = datetime.now(MSK)
     sd = ed = None
     if not args:
         pass
     elif args[0].lower() == "week":
-        sd = now - timedelta(days=7); ed = now
+        sd = now - timedelta(days=7)
+        ed = now
     elif args[0].lower() == "month":
-        sd = now.replace(day=1); ed = now
+        sd = now.replace(day=1)
+        ed = now
     elif len(args) == 2:
-        sd = datetime.strptime(args[0], "%d.%m.%Y"); ed = datetime.strptime(args[1], "%d.%m.%Y")
+        sd = datetime.strptime(args[0], "%d.%m.%Y")
+        ed = datetime.strptime(args[1], "%d.%m.%Y")
     else:
         months = {"январь":1,"февраль":2,"март":3,"апрель":4,"май":5,"июнь":6,"июль":7,
                   "август":8,"сентябрь":9,"октябрь":10,"ноябрь":11,"декабрь":12}
         part = args[0].lower().replace("-", " ").split()
         if not part or part[0] not in months:
-            await message.answer("❓ Примеры: /export week, /export month, /export Ноябрь-2026, /export 01.11.2026 21.11.2026"); return
+            await message.answer("❓ Примеры: /export week, /export month, /export Ноябрь-2026, /export 01.11.2026 21.11.2026")
+            return
         import calendar
-        m = months[part[0]]; y = int(part[1]) if len(part) > 1 else now.year
-        sd = datetime(y, m, 1); ed = datetime(y, m, calendar.monthrange(y, m)[1])
+        m = months[part[0]]
+        y = int(part[1]) if len(part) > 1 else now.year
+        sd = datetime(y, m, 1)
+        ed = datetime(y, m, calendar.monthrange(y, m)[1])
+
+    sd_str = sd.strftime("%d.%m.%Y") if sd else None
+    ed_str = ed.strftime("%d.%m.%Y") if ed else None
+
+    file_path = generate_excel(start_date=sd_str, end_date=ed_str)
+    if not file_path:
+        await message.answer("📭 Нет данных за выбранный период.")
+        return
+
+    await message.answer_document(FSInputFile(file_path), caption="📎 Отчёт готов")
+
+# ===== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ СВОДКИ (ИСПРАВЛЕННАЯ) =====
+async def send_summary_text(message_or_callback, start_date: str, end_date: str):
+    if hasattr(message_or_callback, 'message'):
+        msg = message_or_callback.message
+        await msg.edit_text(f"📊 Считаю сводку за период {start_date} — {end_date}...")
+    else:
+        msg = message_or_callback
+        await msg.answer(f"📊 Считаю сводку за период {start_date} — {end_date}...")
 
     conn = sqlite3.connect(DB_FILE)
-    rows = conn.execute("SELECT tg_id, date, metric, value FROM data").fetchall()
-    users = conn.execute("SELECT tg_id, full_name FROM users ORDER BY full_name").fetchall()
+    # ВАЖНО: добавили d.date в выборку, чтобы фильтрация работала!
+    rows = conn.execute("""
+        SELECT u.full_name, d.date, d.metric, d.value 
+        FROM data d 
+        JOIN users u ON d.tg_id = u.tg_id
+    """).fetchall()
     conn.close()
-    if target:
-        users = [u for u in users if u[0] == target]
 
-    store = {}
-    dates = set()
-    for tg_id, date, metric, value in rows:
-        d = datetime.strptime(date, "%d.%m.%Y")
-        if sd and not (sd <= d <= ed): continue
-        store.setdefault(tg_id, {}).setdefault(date, {})[metric] = int(value)
-        dates.add(date)
-    dates = sorted(dates, key=lambda s: datetime.strptime(s, "%d.%m.%Y"))
-    if not users or not dates:
-        await message.answer("📭 Нет данных за выбранный период."); return
+    def to_cmp(d):
+        try:
+            p = str(d).split('.')
+            if len(p) == 3:
+                return f"{p[2]}-{p[1]}-{p[0]}"
+        except:
+            pass
+        return str(d)
 
-    wb = Workbook(); ws = wb.active; ws.title = "Отчет"
-    thin = Side(style="thin", color="FFFFFF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    head_fill = PatternFill("solid", fgColor="4472C4")
-    date_fill = PatternFill("solid", fgColor="2F5597")
-    white_bold = Font(bold=True, color="FFFFFF", size=12)
-
-    ws.cell(row=1, column=1, value="").fill = PatternFill("solid", fgColor="000000")
-    col = 2
-    for d in dates:
-        ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col+2)
-        c = ws.cell(row=1, column=col, value=d)
-        c.fill = date_fill; c.font = white_bold; c.alignment = Alignment(horizontal="center")
-        for i in range(3): ws.cell(row=1, column=col+i).border = border
-        col += 3
-
-    c = ws.cell(row=2, column=1, value="ФИО")
-    c.fill = head_fill; c.font = white_bold; c.border = border
-    col = 2
-    for d in dates:
-        for name in ("ДК", "ИДК", "Био"):
-            c = ws.cell(row=2, column=col, value=name)
-            c.fill = head_fill; c.font = white_bold
-            c.alignment = Alignment(horizontal="center"); c.border = border
-            col += 1
-
-    row = 3
-    for tg_id, full_name in users:
-        c = ws.cell(row=row, column=1, value=full_name)
-        c.font = Font(bold=True, size=12); c.border = border
-        col = 2
-        for d in dates:
-            v = store.get(tg_id, {}).get(d, {})
-            dk = f"{v.get('dk_zayavki', 0)}/{v.get('dk_vydacha', 0)}" if v and ('dk_zayavki' in v or 'dk_vydacha' in v) else ""
-            idk = f"{v.get('idk_zayavki', 0)}/{v.get('idk_vydacha', 0)}" if v and ('idk_zayavki' in v or 'idk_vydacha' in v) else ""
-            bio = v.get("bio", "") if v else ""
-            for i, val in enumerate((dk, idk, bio)):
-                c = ws.cell(row=row, column=col+i, value=val)
-                c.alignment = Alignment(horizontal="center"); c.border = border
-            col += 3
-        row += 1
-
-    max_name = max([len(u[1]) for u in users] + [3])
-    ws.column_dimensions["A"].width = min(max_name + 3, 45)
-    for i in range(2, 2 + 3*len(dates)):
-        ws.column_dimensions[get_column_letter(i)].width = 10
-    ws.freeze_panes = "B3"
+    s_cmp, e_cmp = to_cmp(start_date), to_cmp(end_date)
     
-    wb.save(EXCEL_FILE)
-    await message.answer_document(FSInputFile(EXCEL_FILE))
+    filtered = []
+    for row in rows:
+        full_name, date_str, metric, value = row
+        if s_cmp <= to_cmp(date_str) <= e_cmp:
+            filtered.append((full_name, metric, value))
 
-def split_message(text, max_len=4000):
+    if not filtered:
+        await msg.answer(f"📭 Нет данных за период {start_date} — {end_date}.")
+        return
+
+    user_data = {}
+    for full_name, metric, value in filtered:
+        if full_name not in user_data:
+            user_data[full_name] = {'dk_z': 0, 'dk_v': 0, 'idk_z': 0, 'idk_v': 0, 'bio': 0}
+        if metric == 'dk_zayavki': user_data[full_name]['dk_z'] += int(value)
+        elif metric == 'dk_vydacha': user_data[full_name]['dk_v'] += int(value)
+        elif metric == 'idk_zayavki': user_data[full_name]['idk_z'] += int(value)
+        elif metric == 'idk_vydacha': user_data[full_name]['idk_v'] += int(value)
+        elif metric == 'bio': user_data[full_name]['bio'] += int(value)
+
+    text = f"📊 **Сводка за {start_date} — {end_date}:**\n\n"
+    for full_name, m in sorted(user_data.items()):
+        if m['dk_z'] > 0 or m['idk_z'] > 0 or m['bio'] > 0:
+            text += (f"👤 {full_name}:\n"
+                     f"  🔹 ДК: {m['dk_z']}(заявки) / {m['dk_v']}(выдано)\n"
+                     f"  🔹 ИДК: {m['idk_z']}(заявки) / {m['idk_v']}(выдано)\n"
+                     f"  🔹 Био: {m['bio']}\n\n")
+    
+    grand_dk_z = sum(d['dk_z'] for d in user_data.values())
+    grand_dk_v = sum(d['dk_v'] for d in user_data.values())
+    grand_idk_z = sum(d['idk_z'] for d in user_data.values())
+    grand_idk_v = sum(d['idk_v'] for d in user_data.values())
+    grand_bio = sum(d['bio'] for d in user_data.values())
+
+    text += f"📈 **Итого по всем:**\n"
+    text += f"  🔹 ДК: {grand_dk_z}(заявки) / {grand_dk_v}(выдано)\n"
+    text += f"  🔹 ИДК: {grand_idk_z}(заявки) / {grand_idk_v}(выдано)\n"
+    text += f"  🔹 Био: {grand_bio}"
+
+    # Разбиваем длинное сообщение, если нужно
+    max_len = 4000
     parts = []
     while len(text) > max_len:
         idx = text.rfind('\n\n', 0, max_len)
         if idx == -1: idx = max_len
-        parts.append(text[:idx]); text = text[idx:].lstrip()
+        parts.append(text[:idx])
+        text = text[idx:].lstrip()
     if text: parts.append(text)
-    return parts
 
+    for part in parts:
+        await msg.answer(part, parse_mode="Markdown")
+
+# ===== ОБРАБОТЧИК /summary С КНОПКАМИ =====
 @router.message(Command("summary"))
-async def team_summary(message: Message):
-    role = get_role(message.from_user.id)
-    if role not in ("admin", "lead"): await message.answer("⛔ Только руководитель или админ."); return
-    args = message.text.split(maxsplit=1); args_str = args[1].strip() if len(args) > 1 else 'week'
-    start_date, end_date = parse_date_range(args_str)
-    conn = sqlite3.connect(DB_FILE)
-    all_rows = conn.execute("SELECT u.full_name, d.metric, d.value FROM data d JOIN users u ON d.tg_id = u.tg_id").fetchall()
-    conn.close()
-    filtered = filter_data_by_date(all_rows, start_date, end_date)
-    if not filtered: await message.answer("📭 Данных нет за выбранный период."); return
+async def summary_cmd(message: Message):
+    if get_role(message.from_user.id) not in ("admin", "lead"):
+        await message.answer("⛔ Только руководитель или админ.")
+        return
     
-    user_data = {}
-    for full_name, metric, value in filtered: user_data.setdefault(full_name, {})[metric] = user_data[full_name].get(metric, 0) + int(value)
-    period_text = "за всё время" if not start_date else (f"за {start_date}" if start_date == end_date else f"с {start_date} по {end_date}")
-    text = f"📊 Сводка по команде {period_text}:\n\n"
-    for full_name, m in sorted(user_data.items()):
-        text += (f"👤 {full_name}:\n  🔹 ДК: {m.get('dk_zayavki', 0)}(заявки) / {m.get('dk_vydacha', 0)}(выдано)\n  🔹 ИДК: {m.get('idk_zayavki', 0)}(заявки) / {m.get('idk_vydacha', 0)}(выдано)\n  🔹 Био: {m.get('bio', 0)}\n\n")
-    for part in split_message(text): await message.answer(part)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Сегодня", callback_data="sum_today"),
+         InlineKeyboardButton(text="📅 Вчера", callback_data="sum_yesterday")],
+        [InlineKeyboardButton(text="📆 Неделя", callback_data="sum_week"),
+         InlineKeyboardButton(text="📆 Месяц", callback_data="sum_month")],
+        [InlineKeyboardButton(text="🗓 Свой период", callback_data="sum_custom")]
+    ])
+    await message.answer("📊 Выбери период для сводки:", reply_markup=keyboard)
+
+# ===== ОБРАБОТЧИКИ КНОПОК ПЕРИОДА =====
+@router.callback_query(F.data.in_({"sum_today", "sum_yesterday", "sum_week", "sum_month"}))
+async def summary_period_cb(callback: CallbackQuery):
+    if get_role(callback.from_user.id) not in ("admin", "lead"):
+        await callback.answer("⛔ Нет доступа.")
+        return
+    
+    now = datetime.now(MSK)
+    if callback.data == "sum_today":
+        start = end = now.strftime("%d.%m.%Y")
+    elif callback.data == "sum_yesterday":
+        start = end = (now - timedelta(days=1)).strftime("%d.%m.%Y")
+    elif callback.data == "sum_week":
+        start = (now - timedelta(days=6)).strftime("%d.%m.%Y")
+        end = now.strftime("%d.%m.%Y")
+    elif callback.data == "sum_month":
+        start = now.replace(day=1).strftime("%d.%m.%Y")
+        end = now.strftime("%d.%m.%Y")
+    
+    await callback.answer()
+    await send_summary_text(callback, start, end)
+
+# ===== ОБРАБОТЧИКИ "СВОЙ ПЕРИОД" =====
+@router.callback_query(F.data == "sum_custom")
+async def summary_custom_cb(callback: CallbackQuery):
+    if get_role(callback.from_user.id) not in ("admin", "lead"):
+        await callback.answer("⛔ Нет доступа.")
+        return
+    await callback.message.edit_text("📅 Введи начальную дату (ДД.ММ.ГГГГ):")
+    await callback.answer()
+    await callback.state.set_state(InputState.summary_start_date)
+
+@router.message(InputState.summary_start_date)
+async def summary_start_handler(message: Message, state: FSMContext):
+    try:
+        datetime.strptime(message.text.strip(), "%d.%m.%Y")
+        await state.update_data(start_date=message.text.strip())
+        await message.answer("📅 Теперь введи конечную дату (ДД.ММ.ГГГГ):")
+        await state.set_state(InputState.summary_end_date)
+    except ValueError:
+        await message.answer("❌ Неверный формат. Пример: 01.11.2026. Попробуй ещё раз:")
+
+@router.message(InputState.summary_end_date)
+async def summary_end_handler(message: Message, state: FSMContext):
+    try:
+        datetime.strptime(message.text.strip(), "%d.%m.%Y")
+        data = await state.get_data()
+        start = data["start_date"]
+        end = message.text.strip()
+        await state.clear()
+        await send_summary_text(message, start, end)
+    except ValueError:
+        await message.answer("❌ Неверный формат. Пример: 21.11.2026. Попробуй ещё раз:")
 
 # ===== СПИСОК ПОЛЬЗОВАТЕЛЕЙ И ДИНАМИКА =====
 @router.message(Command("users"))
 async def list_users(message: Message):
     role = get_role(message.from_user.id)
-    if role not in ("admin", "lead"): await message.answer("⛔ Только руководитель или админ."); return
+    if role not in ("admin", "lead"):
+        await message.answer("⛔ Только руководитель или админ.")
+        return
     conn = sqlite3.connect(DB_FILE)
     users = conn.execute("SELECT tg_id, full_name FROM users ORDER BY full_name").fetchall()
     conn.close()
-    if not users: await message.answer("📭 Пользователей нет."); return
-    text = "👥 Выберите пользователя:\n\n"; keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    if not users:
+        await message.answer("📭 Пользователей нет.")
+        return
+    text = "👥 Выберите пользователя:\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     for tg_id, full_name in users:
         role_icon = "👨‍💻" if tg_id in ADMIN_IDS else ("👔" if tg_id in LEAD_IDS else "👤")
         text += f"{role_icon} {full_name} (ID: {tg_id})\n"
@@ -604,37 +804,59 @@ async def list_users(message: Message):
 
 @router.callback_query(F.data.startswith("user_summary_"))
 async def user_summary(callback: CallbackQuery):
-    if get_role(callback.from_user.id) not in ("admin", "lead"): await callback.answer("⛔ Нет доступа."); return
-    target_id = int(callback.data.replace("user_summary_", "")); user = get_user(target_id)
-    if not user: await callback.answer("❌ Не найден."); return
-    now = datetime.now(MSK); start_date, end_date = now.replace(day=1).strftime("%d.%m.%Y"), now.strftime("%d.%m.%Y")
+    if get_role(callback.from_user.id) not in ("admin", "lead"):
+        await callback.answer("⛔ Нет доступа.")
+        return
+    target_id = int(callback.data.replace("user_summary_", ""))
+    user = get_user(target_id)
+    if not user:
+        await callback.answer("❌ Не найден.")
+        return
+    now = datetime.now(MSK)
+    start_date, end_date = now.replace(day=1).strftime("%d.%m.%Y"), now.strftime("%d.%m.%Y")
     conn = sqlite3.connect(DB_FILE)
     rows = conn.execute("SELECT metric, SUM(value), date FROM data WHERE tg_id = ? AND date BETWEEN ? AND ? GROUP BY metric, date ORDER BY date", (target_id, start_date, end_date)).fetchall()
     conn.close()
-    if not rows: await callback.message.answer(f"📭 У {user[1]} нет данных за текущий месяц."); await callback.answer(); return
+    if not rows:
+        await callback.message.answer(f"📭 У {user[1]} нет данных за текущий месяц.")
+        await callback.answer()
+        return
     
     daily_data, total_data = {}, {}
-    for metric, value, date in rows: daily_data.setdefault(date, {})[metric] = int(value); total_data[metric] = total_data.get(metric, 0) + int(value)
+    for metric, value, date in rows:
+        daily_data.setdefault(date, {})[metric] = int(value)
+        total_data[metric] = total_data.get(metric, 0) + int(value)
+        
     text = f"📊 Динамика: {user[1]}\nПериод: {start_date} – {end_date}\n\n📈 ИТОГО:\n  🔹 ДК: {total_data.get('dk_zayavki', 0)}(заявки) / {total_data.get('dk_vydacha', 0)}(выдано)\n  🔹 ИДК: {total_data.get('idk_zayavki', 0)}(заявки) / {total_data.get('idk_vydacha', 0)}(выдано)\n  🔹 Био: {total_data.get('bio', 0)}\n\n📅 ПО ДНЯМ (последние 10):\n"
     sorted_dates = sorted(daily_data.keys(), key=lambda x: datetime.strptime(x, "%d.%m.%Y"), reverse=True)[:10]
     for date in sorted_dates:
-        dd = daily_data[date]; text += f"  {date}: ДК {dd.get('dk_zayavki', 0)}/{dd.get('dk_vydacha', 0)} | ИДК {dd.get('idk_zayavki', 0)}/{dd.get('idk_vydacha', 0)} | Био {dd.get('bio', 0)}\n"
+        dd = daily_data[date]
+        text += f"  {date}: ДК {dd.get('dk_zayavki', 0)}/{dd.get('dk_vydacha', 0)} | ИДК {dd.get('idk_zayavki', 0)}/{dd.get('idk_vydacha', 0)} | Био {dd.get('bio', 0)}\n"
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📎 Выгрузить Excel", callback_data=f"user_export_{target_id}")]])
-    await callback.message.answer(text, reply_markup=keyboard); await callback.answer()
+    await callback.message.answer(text, reply_markup=keyboard)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("user_export_"))
 async def user_export(callback: CallbackQuery):
-    if get_role(callback.from_user.id) not in ("admin", "lead"): await callback.answer("⛔ Нет доступа."); return
+    if get_role(callback.from_user.id) not in ("admin", "lead"):
+        await callback.answer("⛔ Нет доступа.")
+        return
     target_id = int(callback.data.replace("user_export_", ""))
     try:
         file_path, name = generate_excel_for_user(target_id)
-        if not file_path: await callback.message.answer(f"📭 Нет данных у {name}."); await callback.answer(); return
+        if not file_path:
+            await callback.message.answer(f"📭 Нет данных.")
+            await callback.answer()
+            return
         await callback.message.answer_document(FSInputFile(file_path), caption=f"📎 Отчёт по: {name}")
-        os.remove(file_path); await callback.answer("✅ Выгружено")
-    except Exception as e: await callback.message.answer(f"❌ Ошибка: {e}"); await callback.answer()
-# ===== ПОДСКАЗКИ КОМАНД (меню при вводе "/") =====
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+        os.remove(file_path)
+        await callback.answer("✅ Выгружено")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {e}")
+        await callback.answer()
 
+# ===== ПОДСКАЗКИ КОМАНД =====
 USER_COMMANDS = [
     BotCommand(command="start", description="Регистрация в боте"),
     BotCommand(command="help", description="Справка по командам"),
