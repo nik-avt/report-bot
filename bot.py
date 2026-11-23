@@ -402,312 +402,155 @@ def generate_excel(start_date=None, end_date=None):
     users = conn.execute("SELECT tg_id, full_name FROM users ORDER BY full_name").fetchall()
     all_data = conn.execute("SELECT tg_id, date, metric, value FROM data").fetchall()
     conn.close()
-    
-    clean_data = []
-    valid_dates_set = set()
+
+    # Фильтруем данные по периоду
+    filtered = []
+    valid_dates = set()
     for tg_id, date_str, metric, value in all_data:
         try:
             dt = datetime.strptime(date_str, "%d.%m.%Y")
-            if dt.year < 2020 or dt > datetime.now() + timedelta(days=1):
-                continue
             if start_date and end_date:
                 s = datetime.strptime(start_date, "%d.%m.%Y")
                 e = datetime.strptime(end_date, "%d.%m.%Y")
                 if not (s <= dt <= e):
                     continue
-            clean_data.append((tg_id, date_str, metric, value))
-            valid_dates_set.add(date_str)
+            filtered.append((tg_id, date_str, metric, int(value)))
+            valid_dates.add(date_str)
         except ValueError:
             continue
-            
-    if not clean_data:
-        return None
-    
-    wb = Workbook()
-    wb.remove(wb.active)
-    sorted_dates = sorted(list(valid_dates_set), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
-    ws = wb.create_sheet(title="Отчет")
-    
-    header_font = Font(bold=True, size=11, color="FFFFFF")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    subheader_fill = PatternFill(start_color="5B9BD5", end_color="5B9BD5", fill_type="solid")
-    user_fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-
-    current_row = 1
-    col_idx = 2
-    
-    for tg_id, full_name in users:
-        user_has_data = any(d[0] == tg_id for d in clean_data)
-        if not user_has_data:
-            continue
-        
-        last_col_idx = len(sorted_dates) * 3 + 1
-        last_col_letter = get_column_letter(last_col_idx)
-        ws.merge_cells(f'A{current_row}:{last_col_letter}{current_row}')
-        name_cell = ws[f'A{current_row}']
-        name_cell.value = full_name
-        name_cell.font = Font(bold=True, size=12)
-        name_cell.fill = user_fill
-        name_cell.border = thin_border
-        name_cell.alignment = Alignment(horizontal="left", vertical="center")
-        current_row += 1
-        
-        ws.cell(row=current_row, column=1).value = "Показатель"
-        ws.cell(row=current_row, column=1).font = header_font
-        ws.cell(row=current_row, column=1).fill = header_fill
-        ws.cell(row=current_row, column=1).border = thin_border
-        ws.cell(row=current_row+1, column=1).border = thin_border 
-        
-        col_idx = 2
-        for date_str in sorted_dates:
-            start_l = get_column_letter(col_idx)
-            end_l = get_column_letter(col_idx + 2)
-            ws.merge_cells(f'{start_l}{current_row}:{end_l}{current_row}')
-            d_cell = ws[f'{start_l}{current_row}']
-            d_cell.value = date_str
-            d_cell.font = header_font
-            d_cell.fill = header_fill
-            d_cell.alignment = Alignment(horizontal="center")
-            d_cell.border = thin_border
-            
-            subs = ["ДК", "ИДК", "Био"]
-            for i, s in enumerate(subs):
-                c = ws.cell(row=current_row+1, column=col_idx+i)
-                c.value = s
-                c.font = Font(bold=True, size=10, color="FFFFFF")
-                c.fill = subheader_fill
-                c.alignment = Alignment(horizontal="center")
-                c.border = thin_border
-            col_idx += 3
-        current_row += 2
-        
-        u_data = {}
-        for tid, d, m, v in clean_data:
-            if tid == tg_id:
-                u_data.setdefault(d, {})[m] = u_data.get(d, {}).get(m, 0) + v
-        
-        metrics_map = [("ДК (заяв/выд)", 'dk_zayavki', 'dk_vydacha', 0), ("ИДК (заяв/выд)", 'idk_zayavki', 'idk_vydacha', 1), ("Био", 'bio', None, 2)]
-        rows_offset = 0
-        for label, m1, m2, col_offset in metrics_map:
-            r = current_row + rows_offset
-            c = ws.cell(row=r, column=1)
-            c.value = label
-            c.fill = user_fill
-            c.border = thin_border
-            
-            date_col_start = 2
-            for date_str in sorted_dates:
-                dd = u_data.get(date_str, {})
-                target_col = date_col_start + col_offset
-                if m2:
-                    v1 = int(dd.get(m1, 0))
-                    v2 = int(dd.get(m2, 0))
-                    val = f"{v1}/{v2}" if (v1 or v2) else "-"
-                else:
-                    v1 = int(dd.get(m1, 0))
-                    val = str(v1) if v1 else "-"
-                
-                cell = ws.cell(row=r, column=target_col)
-                cell.value = val
-                cell.alignment = Alignment(horizontal="center")
-                cell.border = thin_border
-                date_col_start += 3
-            rows_offset += 1
-        current_row += 3
-        ws.row_dimensions[current_row].height = 4
-        current_row += 1
-
-    ws.column_dimensions['A'].width = 22
-    for i in range(2, col_idx):
-        ws.column_dimensions[get_column_letter(i)].width = 8
-        
-    wb.save(EXCEL_FILE)
-    return EXCEL_FILE
-
-def generate_excel_for_user(tg_id, start_date=None, end_date=None):
-    conn = sqlite3.connect(DB_FILE)
-    user = conn.execute("SELECT full_name FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
-    all_data = conn.execute("SELECT date, metric, value FROM data WHERE tg_id = ?", (tg_id,)).fetchall()
-    conn.close()
-    if not user or not all_data:
-        return None, None
-        
-    all_data = filter_data_by_date(all_data, start_date, end_date)
-    if not all_data:
-        return None, None
-    
-    wb = Workbook()
-    ws = wb.active
-    ws.title = f"{user[0]}"[:31]
-    header_font = Font(bold=True, size=11, color="FFFFFF")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-    
-    dates = sorted(set(row[0] for row in all_data), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
-    ws.append(["Показатель"] + [datetime.strptime(d, "%d.%m.%Y").day for d in dates])
-    for cell in ws[1]:
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = thin_border
-    
-    metrics_map = {}
-    for date, metric, value in all_data:
-        metrics_map.setdefault(metric, {})[date] = metrics_map.get(metric, {}).get(date, 0) + value
-    
-    row_idx = 2
-    for label, key in METRICS_ORDER:
-        row = [label] + [int(metrics_map.get(key, {}).get(d, 0)) for d in dates]
-        ws.append(row)
-        for cell in ws[row_idx]:
-            cell.border = thin_border
-            cell.alignment = Alignment(horizontal="center")
-        row_idx += 1
-        
-    ws.column_dimensions['A'].width = 18
-    for i in range(2, 2 + len(dates)):
-        col_letter = chr(64 + i) if i <= 26 else chr(64 + (i-1)//26) + chr(65 + (i-1)%26)
-        ws.column_dimensions[col_letter].width = 6
-    
-    filename = f"report_{user[0].replace(' ', '_')}_{datetime.now().strftime('%d%m%Y')}.xlsx"
-    wb.save(filename)
-    return filename, user[0]
-
-# ===== КОМАНДЫ ЭКСПОРТА =====
-@router.message(Command("export"))
-async def export_excel(message: Message):
-    role = get_role(message.from_user.id)
-    if role not in ("admin", "lead"):
-        await message.answer("⛔ Только руководитель или админ.")
-        return
-
-    args = message.text.split()[1:]
-    target = None
-    if args and args[0].lower() == "user":
-        if len(args) < 2:
-            await message.answer("❓ Укажи ID: /export user 123456789 [week|month]")
-            return
-        target = int(args[1])
-        args = args[2:]
-
-    now = datetime.now(MSK)
-    sd = ed = None
-    if not args:
-        pass
-    elif args[0].lower() == "week":
-        sd = now - timedelta(days=7)
-        ed = now
-    elif args[0].lower() == "month":
-        sd = now.replace(day=1)
-        ed = now
-    elif len(args) == 2:
-        sd = datetime.strptime(args[0], "%d.%m.%Y")
-        ed = datetime.strptime(args[1], "%d.%m.%Y")
-    else:
-        months = {"январь":1,"февраль":2,"март":3,"апрель":4,"май":5,"июнь":6,"июль":7,
-                  "август":8,"сентябрь":9,"октябрь":10,"ноябрь":11,"декабрь":12}
-        part = args[0].lower().replace("-", " ").split()
-        if not part or part[0] not in months:
-            await message.answer("❓ Примеры: /export week, /export month, /export Ноябрь-2026, /export 01.11.2026 21.11.2026")
-            return
-        import calendar
-        m = months[part[0]]
-        y = int(part[1]) if len(part) > 1 else now.year
-        sd = datetime(y, m, 1)
-        ed = datetime(y, m, calendar.monthrange(y, m)[1])
-
-    sd_str = sd.strftime("%d.%m.%Y") if sd else None
-    ed_str = ed.strftime("%d.%m.%Y") if ed else None
-
-    file_path = generate_excel(start_date=sd_str, end_date=ed_str)
-    if not file_path:
-        await message.answer("📭 Нет данных за выбранный период.")
-        return
-
-    await message.answer_document(FSInputFile(file_path), caption="📎 Отчёт готов")
-
-# ===== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ СВОДКИ (ИСПРАВЛЕННАЯ) =====
-async def send_summary_text(message_or_callback, start_date: str, end_date: str):
-    if hasattr(message_or_callback, 'message'):
-        msg = message_or_callback.message
-        await msg.edit_text(f"📊 Считаю сводку за период {start_date} — {end_date}...")
-    else:
-        msg = message_or_callback
-        await msg.answer(f"📊 Считаю сводку за период {start_date} — {end_date}...")
-
-    conn = sqlite3.connect(DB_FILE)
-    # ВАЖНО: добавили d.date в выборку, чтобы фильтрация работала!
-    rows = conn.execute("""
-        SELECT u.full_name, d.date, d.metric, d.value 
-        FROM data d 
-        JOIN users u ON d.tg_id = u.tg_id
-    """).fetchall()
-    conn.close()
-
-    def to_cmp(d):
-        try:
-            p = str(d).split('.')
-            if len(p) == 3:
-                return f"{p[2]}-{p[1]}-{p[0]}"
-        except:
-            pass
-        return str(d)
-
-    s_cmp, e_cmp = to_cmp(start_date), to_cmp(end_date)
-    
-    filtered = []
-    for row in rows:
-        full_name, date_str, metric, value = row
-        if s_cmp <= to_cmp(date_str) <= e_cmp:
-            filtered.append((full_name, metric, value))
 
     if not filtered:
-        await msg.answer(f"📭 Нет данных за период {start_date} — {end_date}.")
-        return
+        return None
 
-    user_data = {}
-    for full_name, metric, value in filtered:
-        if full_name not in user_data:
-            user_data[full_name] = {'dk_z': 0, 'dk_v': 0, 'idk_z': 0, 'idk_v': 0, 'bio': 0}
-        if metric == 'dk_zayavki': user_data[full_name]['dk_z'] += int(value)
-        elif metric == 'dk_vydacha': user_data[full_name]['dk_v'] += int(value)
-        elif metric == 'idk_zayavki': user_data[full_name]['idk_z'] += int(value)
-        elif metric == 'idk_vydacha': user_data[full_name]['idk_v'] += int(value)
-        elif metric == 'bio': user_data[full_name]['bio'] += int(value)
+    sorted_dates = sorted(valid_dates, key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
 
-    text = f"📊 **Сводка за {start_date} — {end_date}:**\n\n"
-    for full_name, m in sorted(user_data.items()):
-        if m['dk_z'] > 0 or m['idk_z'] > 0 or m['bio'] > 0:
-            text += (f"👤 {full_name}:\n"
-                     f"  🔹 ДК: {m['dk_z']}(заявки) / {m['dk_v']}(выдано)\n"
-                     f"  🔹 ИДК: {m['idk_z']}(заявки) / {m['idk_v']}(выдано)\n"
-                     f"  🔹 Био: {m['bio']}\n\n")
-    
-    grand_dk_z = sum(d['dk_z'] for d in user_data.values())
-    grand_dk_v = sum(d['dk_v'] for d in user_data.values())
-    grand_idk_z = sum(d['idk_z'] for d in user_data.values())
-    grand_idk_v = sum(d['idk_v'] for d in user_data.values())
-    grand_bio = sum(d['bio'] for d in user_data.values())
+    # Собираем данные в словарь: {tg_id: {date: {metric: value}}}
+    store = {}
+    for tg_id, date_str, metric, value in filtered:
+        store.setdefault(tg_id, {}).setdefault(date_str, {})[metric] = value
 
-    text += f"📈 **Итого по всем:**\n"
-    text += f"  🔹 ДК: {grand_dk_z}(заявки) / {grand_dk_v}(выдано)\n"
-    text += f"  🔹 ИДК: {grand_idk_z}(заявки) / {grand_idk_v}(выдано)\n"
-    text += f"  🔹 Био: {grand_bio}"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Отчет"
 
-    # Разбиваем длинное сообщение, если нужно
-    max_len = 4000
-    parts = []
-    while len(text) > max_len:
-        idx = text.rfind('\n\n', 0, max_len)
-        if idx == -1: idx = max_len
-        parts.append(text[:idx])
-        text = text[idx:].lstrip()
-    if text: parts.append(text)
+    # Стили
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    date_fill = PatternFill("solid", fgColor="2F5597")
+    head_fill = PatternFill("solid", fgColor="4472C4")
+    total_fill = PatternFill("solid", fgColor="FFE699")
+    wb_font = Font(bold=True, color="FFFFFF", size=11)
+    total_font = Font(bold=True, size=11)
+    center = Alignment(horizontal="center", vertical="center")
 
-    for part in parts:
-        await msg.answer(part, parse_mode="Markdown")
+    # Строка 1: даты (объединённые по 3 колонки)
+    ws.cell(row=1, column=1, value="").fill = PatternFill("solid", fgColor="000000")
+    col = 2
+    for d in sorted_dates:
+        ws.merge_cells(start_row=1, start_column=col, end_row=1, end_column=col + 2)
+        c = ws.cell(row=1, column=col, value=d)
+        c.fill = date_fill
+        c.font = wb_font
+        c.alignment = center
+        for i in range(3):
+            ws.cell(row=1, column=col + i).border = border
+        col += 3
 
+    # Строка 2: заголовки ФИО | ДК | ИДК | Био | ...
+    c = ws.cell(row=2, column=1, value="ФИО")
+    c.fill = head_fill
+    c.font = wb_font
+    c.border = border
+    col = 2
+    for _ in sorted_dates:
+        for name in ("ДК", "ИДК", "Био"):
+            c = ws.cell(row=2, column=col, value=name)
+            c.fill = head_fill
+            c.font = wb_font
+            c.alignment = center
+            c.border = border
+            col += 1
+
+    # Строки с данными по сотрудникам
+    row = 3
+    for tg_id, full_name in users:
+        c = ws.cell(row=row, column=1, value=full_name)
+        c.font = Font(bold=True, size=11)
+        c.border = border
+        col = 2
+        for d in sorted_dates:
+            v = store.get(tg_id, {}).get(d, {})
+            dk = f"{v.get('dk_zayavki', 0)}/{v.get('dk_vydacha', 0)}" if ('dk_zayavki' in v or 'dk_vydacha' in v) else ""
+            idk = f"{v.get('idk_zayavki', 0)}/{v.get('idk_vydacha', 0)}" if ('idk_zayavki' in v or 'idk_vydacha' in v) else ""
+            bio = v.get("bio", "")
+            for i, val in enumerate((dk, idk, bio)):
+                c = ws.cell(row=row, column=col + i, value=val)
+                c.alignment = center
+                c.border = border
+            col += 3
+        row += 1
+
+    # Итого за день (суммы под каждой датой)
+    c = ws.cell(row=row, column=1, value="Итого за день")
+    c.font = total_font
+    c.fill = total_fill
+    c.border = border
+    grand = [0, 0, 0, 0, 0]  # dk_z, dk_v, idk_z, idk_v, bio
+    col = 2
+    for d in sorted_dates:
+        s = [0, 0, 0, 0, 0]
+        for tg_id, _ in users:
+            v = store.get(tg_id, {}).get(d, {})
+            s[0] += v.get("dk_zayavki", 0)
+            s[1] += v.get("dk_vydacha", 0)
+            s[2] += v.get("idk_zayavki", 0)
+            s[3] += v.get("idk_vydacha", 0)
+            s[4] += v.get("bio", 0)
+        for i in range(5):
+            grand[i] += s[i]
+        for i, val in enumerate([f"{s[0]}/{s[1]}", f"{s[2]}/{s[3]}", s[4]]):
+            c = ws.cell(row=row, column=col + i, value=val)
+            c.font = total_font
+            c.fill = total_fill
+            c.alignment = center
+            c.border = border
+        col += 3
+    row += 1
+
+    # Итого за период
+    label = "Итого за период"
+    if sorted_dates:
+        d0 = datetime.strptime(sorted_dates[0], "%d.%m.%Y")
+        d1 = datetime.strptime(sorted_dates[-1], "%d.%m.%Y")
+        month_end = (d1.replace(day=1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        if d0.day == 1 and d1 == month_end and d0.month == d1.month:
+            label = "Итого за месяц"
+    c = ws.cell(row=row, column=1, value=label)
+    c.font = total_font
+    c.fill = total_fill
+    c.border = border
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=1 + 3 * len(sorted_dates))
+    c = ws.cell(row=row, column=2, value=f"ДК: {grand[0]}/{grand[1]}   |   ИДК: {grand[2]}/{grand[3]}   |   Био: {grand[4]}")
+    c.font = total_font
+    c.fill = total_fill
+    c.alignment = center
+    c.border = border
+    row += 1
+
+    # Обрезаем лишние строки и убираем сетку
+    if ws.max_row >= row:
+        ws.delete_rows(row, ws.max_row - row + 1)
+    ws.sheet_view.showGridLines = False
+
+    # Адаптивная ширина столбцов
+    max_name = max([len(u[1]) for u in users] + [3])
+    ws.column_dimensions["A"].width = min(max_name + 3, 45)
+    for i in range(2, 2 + 3 * len(sorted_dates)):
+        ws.column_dimensions[get_column_letter(i)].width = 10
+    ws.freeze_panes = "B3"
+
+    wb.save(EXCEL_FILE)
+    return EXCEL_FILE
 # ===== ОБРАБОТЧИК /summary С КНОПКАМИ =====
 @router.message(Command("summary"))
 async def summary_cmd(message: Message):
@@ -917,3 +760,4 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
+
