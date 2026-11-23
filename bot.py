@@ -598,13 +598,14 @@ async def summary_period_cb(callback: CallbackQuery):
 
 # ===== КОНКРЕТНАЯ ДАТА =====
 @router.callback_query(F.data == "sum_single")
-async def summary_single_cb(callback: CallbackQuery):
+async def summary_single_cb(callback: CallbackQuery, state: FSMContext):
     if get_role(callback.from_user.id) not in ("admin", "lead"):
         await callback.answer("⛔ Нет доступа.")
         return
+    await state.update_data(is_single=True)
     await callback.message.edit_text("📅 Введи дату (ДД.ММ.ГГГГ):")
     await callback.answer()
-    await callback.state.set_state(InputState.summary_start_date)
+    await state.set_state(InputState.summary_start_date)
 
 
 # ===== СВОЙ ПЕРИОД =====
@@ -789,5 +790,6 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
+
 
 
