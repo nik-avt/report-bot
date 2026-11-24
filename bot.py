@@ -225,6 +225,30 @@ async def cancel_all(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer("Ввод отменён.", reply_markup=main_menu())
 
+@router.message(InputState.final_confirm)
+async def confirm_by_text(message: Message, state: FSMContext):
+    text = message.text.strip().lower()
+    if text in ("сохранить", "💾 сохранить", "заменить", "💾 заменить", "да"):
+        data = await state.get_data()
+        date_str = data["date"]
+        values = data.get("values", {})
+        is_replace = data.get("is_replace", False)
+        conn = sqlite3.connect(DB_FILE)
+        for metric_key, value in values.items():
+            cur = conn.execute("UPDATE data SET value = ? WHERE tg_id = ? AND date = ? AND metric = ?", (value, message.from_user.id, date_str, metric_key))
+            if cur.rowcount == 0:
+                conn.execute("INSERT INTO data (tg_id, date, metric, value) VALUES (?, ?, ?, ?)", (message.from_user.id, date_str, metric_key, value))
+        conn.commit()
+        conn.close()
+        await state.clear()
+        msg = f"✅ Данные за {date_str} заменены!" if is_replace else f"✅ Сохранено за {date_str}!"
+        await message.answer(msg, reply_markup=main_menu())
+    elif text in ("отменить", "❌ отменить", "нет"):
+        await state.clear()
+        await message.answer("Ввод отменён.", reply_markup=main_menu())
+    else:
+        await message.answer("Нажми кнопку 💾 Сохранить под сводкой или напиши «Сохранить» / «Отменить».")
+
 # ===== ПРОСМОТР И РЕДАКТИРОВАНИЕ =====
 @router.message(F.text == "📊 Мои данные")
 async def my_data(message: Message):
